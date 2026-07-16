@@ -37,7 +37,10 @@ class CloseButton(discord.ui.View):
 class Tickets(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        bot.add_view(CloseButton())  # persistent view
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self.bot.add_view(CloseButton())
 
     @discord.slash_command(name="ticket", description="Open a support ticket")
     async def ticket(self, ctx: discord.ApplicationContext,
