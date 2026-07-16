@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: aute-mod-pro-v2
+    name: auto-mod-pro-v2
     runtime: python3
     region: frankfurt
     plan: free
@@ -10,6 +10,14 @@ services:
       - key: DISCORD_TOKEN
         sync: false
       - key: OWNER_ID
+        sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: DISCORD_CLIENT_SECRET
+        sync: false
+      - key: DISCORD_REDIRECT_URI
+        sync: false
+      - key: DATABASE_URL
         sync: false
       - key: FLASK_SECRET_KEY
         generateValue: true

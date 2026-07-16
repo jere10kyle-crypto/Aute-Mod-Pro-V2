@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% block title %}Settings — Auto-Mod-Pro V2{% endblock %}
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-2xl font-bold text-white">Settings</h1>
+  <p class="text-gray-400 text-sm mt-1">Configure moderation, auto-mod, and features</p>
+</div>
+
+<form method="POST" class="space-y-6">
+
+  <!-- Punishment Tiers -->
+  <div class="card">
+    <h2 class="font-semibold text-white mb-4">⚖️ Punishment Tiers</h2>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead><tr class="text-gray-500 text-left border-b border-gray-800">
+          <th class="pb-2">Tier</th><th class="pb-2">Strikes</th><th class="pb-2">Action</th><th class="pb-2">Duration (min)</th>
+        </tr></thead>
+        <tbody class="divide-y divide-gray-800">
+          {% set tiers = [
+            (1, 'tier1_strikes', 'tier1_minutes', 'Timeout'),
+            (2, 'tier2_strikes', 'tier2_minutes', 'Timeout'),
+            (3, 'tier3_strikes', 'tier3_minutes', 'Timeout'),
+          ] %}
+          {% for num, sk, mk, action in tiers %}
+          <tr>
+            <td class="py-2 pr-4 text-gray-400">Tier {{ num }}</td>
+            <td class="py-2 pr-4"><input type="number" name="{{ sk }}" value="{{ guild_cfg[sk] if guild_cfg is mapping else guild_cfg.__dict__[sk] }}" class="input w-20" min="1" max="20"/></td>
+            <td class="py-2 pr-4 text-indigo-400">{{ action }}</td>
+            <td class="py-2"><input type="number" name="{{ mk }}" value="{{ guild_cfg[mk] if guild_cfg is mapping else guild_cfg.__dict__[mk] }}" class="input w-24" min="1"/></td>
+          </tr>
+          {% endfor %}
+          <tr>
+            <td class="py-2 pr-4 text-gray-400">Tier 4</td>
+            <td class="py-2 pr-4"><input type="number" name="tier4_strikes" value="{{ guild_cfg.tier4_strikes }}" class="input w-20" min="1"/></td>
+            <td class="py-2 pr-4">
+              <select name="tier4_action" class="input w-24">
+                <option value="kick" {% if guild_cfg.tier4_action == 'kick' %}selected{% endif %}>Kick</option>
+                <option value="ban"  {% if guild_cfg.tier4_action == 'ban'  %}selected{% endif %}>Ban</option>
+              </select>
+            </td>
+            <td class="py-2 text-gray-500">—</td>
+          </tr>
+          <tr>
+            <td class="py-2 pr-4 text-gray-400">Tier 5</td>
+            <td class="py-2 pr-4"><input type="number" name="tier5_strikes" value="{{ guild_cfg.tier5_strikes }}" class="input w-20" min="1"/></td>
+            <td class="py-2 pr-4 text-red-400">Ban</td>
+            <td class="py-2 text-gray-500">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Auto-Mod -->
+  <div class="card">
+    <h2 class="font-semibold text-white mb-4">🤖 Auto-Moderation</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {% macro toggle_row(key, label) %}
+      <div class="flex items-center justify-between p-3 bg-gray-800/50 rounded-lg">
+        <span class="text-sm">{{ label }}</span>
+        <label class="toggle">
+          <input type="checkbox" name="{{ key }}" {% if guild_cfg[key] if guild_cfg is mapping else guild_cfg.__dict__.get(key) %}checked{% endif %}/>
+          <span class="slider"></span>
+        </label>
+      </div>
+      {% endmacro %}
+      {{ toggle_row('spam_enabled',    '🚫 Spam Detection') }}
+      {{ toggle_row('caps_enabled',    '🔠 Caps Filter') }}
+      {{ toggle_row('emoji_enabled',   '😀 Emoji Limit') }}
+      {{ toggle_row('mention_enabled', '📣 Mention Spam') }}
+      {{ toggle_row('link_enabled',    '🔗 Link Protection') }}
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+      <div><label class="text-xs text-gray-400">Spam msgs</label><input type="number" name="spam_threshold" value="{{ guild_cfg.spam_threshold }}" class="input mt-1" min="2"/></div>
+      <div><label class="text-xs text-gray-400">Spam window (s)</label><input type="number" name="spam_window" value="{{ guild_cfg.spam_window }}" class="input mt-1" min="3"/></div>
+      <div><label class="text-xs text-gray-400">Caps %</label><input type="number" name="caps_percent" value="{{ guild_cfg.caps_percent }}" class="input mt-1" min="50" max="100"/></div>
+      <div><label class="text-xs text-gray-400">Emoji limit</label><input type="number" name="emoji_limit" value="{{ guild_cfg.emoji_limit }}" class="input mt-1" min="1"/></div>
+      <div><label class="text-xs text-gray-400">Mention limit</label><input type="number" name="mention_limit" value="{{ guild_cfg.mention_limit }}" class="input mt-1" min="1"/></div>
+      <div class="md:col-span-3"><label class="text-xs text-gray-400">Link whitelist (comma separated domains)</label><input type="text" name="link_whitelist" value="{{ guild_cfg.link_whitelist }}" placeholder="youtube.com, twitter.com" class="input mt-1"/></div>
+    </div>
+  </div>
+
+  <!-- Channels -->
+  <div class="card">
+    <h2 class="font-semibold text-white mb-4">📢 Channels & Roles</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div><label class="text-xs text-gray-400">Mod Log Channel ID</label><input type="text" name="mod_log_channel" value="{{ guild_cfg.mod_log_channel or '' }}" placeholder="Channel ID" class="input mt-1"/></div>
+      <div><label class="text-xs text-gray-400">Welcome Channel ID</label><input type="text" name="welcome_channel" value="{{ guild_cfg.welcome_channel or '' }}" placeholder="Channel ID" class="input mt-1"/></div>
+      <div><label class="text-xs text-gray-400">Auto-Role ID</label><input type="text" name="auto_role_id" value="{{ guild_cfg.auto_role_id or '' }}" placeholder="Role ID" class="input mt-1"/></div>
+      <div><label class="text-xs text-gray-400">Level-Up Channel ID</label><input type="text" name="level_channel" value="{{ guild_cfg.level_channel or '' }}" placeholder="Channel ID" class="input mt-1"/></div>
+      <div><label class="text-xs text-gray-400">Ticket Category ID</label><input type="text" name="ticket_category" value="{{ guild_cfg.ticket_category or '' }}" placeholder="Category ID" class="input mt-1"/></div>
+      <div><label class="text-xs text-gray-400">Ticket Log Channel ID</label><input type="text" name="ticket_log" value="{{ guild_cfg.ticket_log or '' }}" placeholder="Channel ID" class="input mt-1"/></div>
+    </div>
+  </div>
+
+  <!-- Welcome -->
+  <div class="card">
+    <h2 class="font-semibold text-white mb-4">👋 Welcome Messages</h2>
+    <div class="flex items-center gap-3 mb-3">
+      <label class="toggle"><input type="checkbox" name="welcome_enabled" {% if guild_cfg.welcome_enabled %}checked{% endif %}/><span class="slider"></span></label>
+      <span class="text-sm text-gray-300">Enable welcome messages</span>
+    </div>
+    <div><label class="text-xs text-gray-400">Message (use {user} {server} {count})</label>
+    <input type="text" name="welcome_message" value="{{ guild_cfg.welcome_message }}" class="input mt-1"/></div>
+  </div>
+
+  <!-- XP / Leveling -->
+  <div class="card">
+    <h2 class="font-semibold text-white mb-4">⬆️ XP & Leveling</h2>
+    <div class="flex items-center gap-3 mb-3">
+      <label class="toggle"><input type="checkbox" name="xp_enabled" {% if guild_cfg.xp_enabled %}checked{% endif %}/><span class="slider"></span></label>
+      <span class="text-sm text-gray-300">Enable XP system</span>
+    </div>
+    <div class="grid grid-cols-2 gap-3">
+      <div><label class="text-xs text-gray-400">XP per message</label><input type="number" name="xp_per_message" value="{{ guild_cfg.xp_per_message }}" class="input mt-1" min="1" max="100"/></div>
+      <div><label class="text-xs text-gray-400">Cooldown (seconds)</label><input type="number" name="xp_cooldown" value="{{ guild_cfg.xp_cooldown }}" class="input mt-1" min="5"/></div>
+    </div>
+  </div>
+
+  <!-- Anti-Raid -->
+  <div class="card">
+    <h2 class="font-semibold text-white mb-4">🚨 Anti-Raid</h2>
+    <div class="flex items-center gap-3 mb-3">
+      <label class="toggle"><input type="checkbox" name="raid_enabled" {% if guild_cfg.raid_enabled %}checked{% endif %}/><span class="slider"></span></label>
+      <span class="text-sm text-gray-300">Enable raid protection</span>
+    </div>
+    <div class="grid grid-cols-3 gap-3">
+      <div><label class="text-xs text-gray-400">Joins to trigger</label><input type="number" name="raid_threshold" value="{{ guild_cfg.raid_threshold }}" class="input mt-1" min="3"/></div>
+      <div><label class="text-xs text-gray-400">Within (seconds)</label><input type="number" name="raid_window" value="{{ guild_cfg.raid_window }}" class="input mt-1" min="3"/></div>
+      <div><label class="text-xs text-gray-400">Action</label>
+        <select name="raid_action" class="input mt-1">
+          <option value="kick" {% if guild_cfg.raid_action == 'kick' %}selected{% endif %}>Kick</option>
+          <option value="ban"  {% if guild_cfg.raid_action == 'ban'  %}selected{% endif %}>Ban</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tickets -->
+  <div class="card">
+    <h2 class="font-semibold text-white mb-4">🎫 Ticket System</h2>
+    <div class="flex items-center gap-3">
+      <label class="toggle"><input type="checkbox" name="ticket_enabled" {% if guild_cfg.ticket_enabled %}checked{% endif %}/><span class="slider"></span></label>
+      <span class="text-sm text-gray-300">Enable ticket system</span>
+    </div>
+  </div>
+
+  <button type="submit" class="btn-primary px-8 py-3 text-base">💾 Save Settings</button>
+</form>
+
+<!-- Banned Words -->
+<div class="card mt-6">
+  <h2 class="font-semibold text-white mb-4">🚫 Banned Words</h2>
+  <div class="flex gap-2 mb-4">
+    <input type="text" id="newWord" placeholder="Add a word or phrase…" class="input flex-1"/>
+    <button onclick="addWord()" class="btn-primary">Add</button>
+  </div>
+  <div id="wordList" class="flex flex-wrap gap-2">
+    {% for w in banned_words %}
+    <span id="word-{{ w.id }}" class="flex items-center gap-1 bg-red-900/40 border border-red-800 text-red-300 text-sm px-3 py-1 rounded-full">
+      {{ w.word }}
+      <button onclick="removeWord({{ w.id }}, '{{ w.word }}')" class="ml-1 hover:text-red-100 transition-colors">✕</button>
+    </span>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const guildId = '{{ guild_id }}';
+async function addWord() {
+  const input = document.getElementById('newWord');
+  const word  = input.value.trim();
+  if (!word) return;
+  const r = await fetch(`/api/${guildId}/banned_words/add`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({word})
+  });
+  const data = await r.json();
+  if (data.error) { alert(data.error); return; }
+  const span = document.createElement('span');
+  span.id = `word-${data.id}`;
+  span.className = 'flex items-center gap-1 bg-red-900/40 border border-red-800 text-red-300 text-sm px-3 py-1 rounded-full';
+  span.innerHTML = `${data.word} <button onclick="removeWord(${data.id},'${data.word}')" class="ml-1 hover:text-red-100">✕</button>`;
+  document.getElementById('wordList').appendChild(span);
+  input.value = '';
+}
+async function removeWord(id, word) {
+  await fetch(`/api/${guildId}/banned_words/${id}`, { method: 'DELETE' });
+  document.getElementById(`word-${id}`)?.remove();
+}
+document.getElementById('newWord')?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addWord(); } });
+</script>
+{% endblock %}

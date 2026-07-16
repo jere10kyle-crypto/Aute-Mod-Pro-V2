@@ -2,7 +2,6 @@
 """
 run.py – Start BOTH the Discord bot and the Flask dashboard in parallel.
 Auto-restarts the bot with exponential backoff if it crashes.
-Usage:  python run.py
 """
 import subprocess, sys, os, signal, threading, time
 
@@ -25,41 +24,35 @@ signal.signal(signal.SIGTERM, shutdown)
 
 bot_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
 
-# ── Dashboard (never restarts — if this dies Render will restart the whole service)
+# ── Dashboard ─────────────────────────────────────────────────────────────────
 dash_proc = subprocess.Popen(
     [sys.executable, os.path.join(ROOT, "dashboard", "app.py")],
     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=bot_env,
 )
 threading.Thread(target=stream, args=(dash_proc, "DASH"), daemon=True).start()
 
-# ── Bot (auto-restart with exponential backoff on crash)
+# ── Bot (auto-restart with exponential backoff) ───────────────────────────────
 def run_bot():
-    delay = 5          # initial wait in seconds before first restart
-    max_delay = 300    # cap at 5 minutes
+    delay    = 5
+    max_delay = 300
     attempts = 0
-
     while running:
         attempts += 1
         print(f"[BOT ] Starting bot (attempt {attempts})…", flush=True)
         proc = subprocess.Popen(
-            [sys.executable, os.path.join(ROOT, "bot", "bot.py")],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=bot_env,
+            [sys.executable, "-m", "bot.bot"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=bot_env, cwd=ROOT,
         )
-        # stream logs in a daemon thread
-        t = threading.Thread(target=stream, args=(proc, "BOT "), daemon=True)
-        t.start()
+        threading.Thread(target=stream, args=(proc, "BOT "), daemon=True).start()
         proc.wait()
-
         if not running:
             break
-
         code = proc.returncode
-        print(f"[BOT ] Exited with code {code}. Restarting in {delay}s…", flush=True)
+        print(f"[BOT ] Exited (code {code}). Restarting in {delay}s…", flush=True)
         time.sleep(delay)
-        delay = min(delay * 2, max_delay)   # exponential backoff
+        delay = min(delay * 2, max_delay)
 
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
+threading.Thread(target=run_bot, daemon=True).start()
 
-# Keep main thread alive (dashboard drives the process lifetime)
 dash_proc.wait()

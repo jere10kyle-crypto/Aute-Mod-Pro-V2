@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>{% block title %}Auto-Mod-Pro V2{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'class' }</script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>
+    body { background: #0f1117; }
+    .sidebar-link { @apply flex items-center gap-3 px-4 py-2.5 rounded-lg text-gray-400 hover:bg-white/10 hover:text-white transition-all; }
+    .sidebar-link.active { @apply bg-indigo-600 text-white; }
+    .card { @apply bg-gray-900 rounded-xl border border-gray-800 p-5; }
+    .btn-primary { @apply px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium transition-colors; }
+    .btn-danger  { @apply px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg font-medium transition-colors; }
+    .input       { @apply w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500; }
+    .toggle { position:relative; display:inline-block; width:44px; height:24px; }
+    .toggle input { opacity:0; width:0; height:0; }
+    .slider { position:absolute; cursor:pointer; inset:0; background:#374151; border-radius:24px; transition:.3s; }
+    .slider:before { position:absolute; content:""; height:18px; width:18px; left:3px; bottom:3px; background:white; border-radius:50%; transition:.3s; }
+    input:checked + .slider { background:#6366f1; }
+    input:checked + .slider:before { transform:translateX(20px); }
+  </style>
+</head>
+<body class="text-white min-h-screen">
+
+{% if session.get('user_id') %}
+<div class="flex h-screen overflow-hidden">
+
+  <!-- Sidebar -->
+  <aside class="w-64 bg-gray-950 border-r border-gray-800 flex flex-col shrink-0">
+    <div class="p-5 border-b border-gray-800">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 bg-indigo-600 rounded-lg flex items-center justify-center text-lg">🛡️</div>
+        <div>
+          <div class="font-bold text-sm">Auto-Mod-Pro V2</div>
+          <div class="text-xs text-gray-500">Dashboard</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Nav -->
+    <nav class="flex-1 p-3 space-y-1 overflow-y-auto">
+      <a href="{{ url_for('index') }}" class="sidebar-link {% if request.endpoint == 'index' %}active{% endif %}">
+        <span>🏠</span> Servers
+      </a>
+      {% if guild_id is defined %}
+      <div class="pt-2 pb-1 px-4 text-xs text-gray-600 uppercase tracking-wider">Server</div>
+      <a href="{{ url_for('dashboard', guild_id=guild_id) }}"
+         class="sidebar-link {% if request.endpoint == 'dashboard' %}active{% endif %}">
+        <span>📊</span> Overview
+      </a>
+      <a href="{{ url_for('settings', guild_id=guild_id) }}"
+         class="sidebar-link {% if request.endpoint == 'settings' %}active{% endif %}">
+        <span>⚙️</span> Settings
+      </a>
+      <a href="{{ url_for('users', guild_id=guild_id) }}"
+         class="sidebar-link {% if request.endpoint == 'users' %}active{% endif %}">
+        <span>👥</span> Members
+      </a>
+      {% endif %}
+    </nav>
+
+    <!-- User -->
+    <div class="p-4 border-t border-gray-800 flex items-center gap-3">
+      {% if session.get('avatar') %}
+      <img src="https://cdn.discordapp.com/avatars/{{ session['user_id'] }}/{{ session['avatar'] }}.png"
+           class="w-8 h-8 rounded-full" alt="avatar"/>
+      {% else %}
+      <div class="w-8 h-8 rounded-full bg-indigo-700 flex items-center justify-center text-xs">
+        {{ (session.get('username','?'))[0]|upper }}
+      </div>
+      {% endif %}
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-medium truncate">{{ session.get('username') }}</div>
+      </div>
+      <a href="{{ url_for('logout') }}" class="text-gray-500 hover:text-red-400 transition-colors text-sm" title="Logout">⏻</a>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="flex-1 overflow-y-auto">
+    <div class="max-w-6xl mx-auto p-6">
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for cat, msg in messages %}
+        <div class="mb-4 p-3 rounded-lg {% if cat == 'success' %}bg-green-900/50 text-green-300 border border-green-700{% else %}bg-red-900/50 text-red-300 border border-red-700{% endif %}">
+          {{ msg }}
+        </div>
+        {% endfor %}
+      {% endwith %}
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+
+</div>
+{% else %}
+  {% block auth_content %}{% endblock %}
+{% endif %}
+
+{% block scripts %}{% endblock %}
+</body>
+</html>

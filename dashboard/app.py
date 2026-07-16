@@ -1,744 +1,399 @@
-from flask import Flask, render_template, request, redirect, url_for, jsonify, session, flash
-from werkzeug.security import generate_password_hash, check_password_hash
+"""app.py — Auto-Mod-Pro V2 Dashboard with Discord OAuth2"""
+from flask import (Flask, render_template, request, redirect, url_for,
+                   jsonify, session, flash)
 from functools import wraps
-import json, os, secrets
+import os, sys, secrets, requests
 from datetime import datetime
-from collections import Counter
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from bot.db import (init_db, SessionLocal, get_guild, get_member,
+                    Guild, Member, Strike, ModLog, BannedWord, Ticket, DashUser,
+                    add_mod_log, xp_for_level)
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
-DEFAULT_SETTINGS = {
-    "tier1_strikes": 1,  "tier1_minutes": 5,
-    "tier2_strikes": 2,  "tier2_minutes": 15,
-    "tier3_strikes": 3,  "tier3_minutes": 60,
-    "tier4_strikes": 4,  "tier4_minutes": 1440,
-    "tier5_strikes": 5,  "tier5_minutes": 40320,
-    "spam_word_limit":   5,
-    "spam_word_window":  10,
-    "spam_word_tier":    2,
-    "raid_join_limit":       5,
-    "raid_join_window":      10,
-    "raid_lockdown_minutes": 10,
-    "raid_timeout_minutes":  10,
-}
+DISCORD_CLIENT_ID     = os.environ.get("DISCORD_CLIENT_ID", "")
+DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
+DISCORD_REDIRECT_URI  = os.environ.get("DISCORD_REDIRECT_URI", "http://localhost:5000/auth/callback")
+OWNER_ID              = os.environ.get("OWNER_ID", "")
 
-DEFAULT_WELCOME = {
-    "enabled":    False,
-    "dm":         True,
-    "channel_id": "",
-    "message":    "👋 Welcome to **{server}**, {user}!\nPlease read the rules and enjoy your stay.",
-}
+DISCORD_API  = "https://discord.com/api/v10"
+DISCORD_AUTH = (
+    "https://discord.com/api/oauth2/authorize"
+    f"?client_id={DISCORD_CLIENT_ID}"
+    f"&redirect_uri={{redirect_uri}}"
+    "&response_type=code"
+    "&scope=identify+guilds"
+)
 
-# ── Guild helpers ──────────────────────────────────────────────────────────────
-def list_guilds():
-    guilds = []
-    if not os.path.isdir(DATA_DIR):
-        return guilds
-    for name in os.listdir(DATA_DIR):
-        if name.isdigit():
-            info_path = os.path.join(DATA_DIR, name, "guild_info.json")
-            try:
-                with open(info_path) as f:
-                    info = json.load(f)
-                guilds.append(info)
-            except (FileNotFoundError, json.JSONDecodeError):
-                guilds.append({"id": name, "name": f"Server {name}", "member_count": 0})
-    return guilds
 
-def get_active_guild_id():
-    guilds = list_guilds()
-    if not guilds:
-        return None
-    saved = session.get("guild_id")
-    ids   = [g["id"] for g in guilds]
-    if saved and saved in ids:
-        return saved
-    gid = guilds[0]["id"]
-    session["guild_id"] = gid
-    return gid
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
-def guild_data_dir(guild_id):
-    d = os.path.join(DATA_DIR, str(guild_id))
-    os.makedirs(d, exist_ok=True)
-    return d
+def discord_request(endpoint: str, token: str) -> dict:
+    r = requests.get(f"{DISCORD_API}{endpoint}",
+                     headers={"Authorization": f"Bearer {token}"}, timeout=10)
+    return r.json() if r.ok else {}
 
-def load(guild_id, f, default):
-    path = os.path.join(guild_data_dir(guild_id), f)
-    try:
-        with open(path) as fp:
-            return json.load(fp)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
 
-def save(guild_id, f, data):
-    path = os.path.join(guild_data_dir(guild_id), f)
-    with open(path, "w") as fp:
-        json.dump(data, fp, indent=2)
+def login_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return wrapper
 
-# ── Auth helpers ──────────────────────────────────────────────────────────────
-def get_users():
-    path = os.path.join(DATA_DIR, "users.json")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    try:
-        with open(path) as fp:
-            return json.load(fp)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
 
-def save_users(users):
-    path = os.path.join(DATA_DIR, "users.json")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(path, "w") as fp:
-        json.dump(users, fp, indent=2)
+def guild_access_required(f):
+    @wraps(f)
+    def wrapper(*args, guild_id, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("login"))
+        uid = str(session["user_id"])
+        if uid == OWNER_ID:
+            return f(*args, guild_id=guild_id, **kwargs)
+        db = SessionLocal()
+        try:
+            g = get_guild(db, int(guild_id))
+            admins = [a.strip() for a in g.dashboard_admins.split(",") if a.strip()]
+            if uid not in admins:
+                flash("You don't have access to that server.", "error")
+                return redirect(url_for("index"))
+        finally:
+            db.close()
+        return f(*args, guild_id=guild_id, **kwargs)
+    return wrapper
 
-def get_pending_dms():
-    path = os.path.join(DATA_DIR, "pending_dms.json")
-    try:
-        with open(path) as fp:
-            return json.load(fp)
-    except (FileNotFoundError, json.JSONDecodeError):
+
+def get_user_guilds(access_token: str) -> list:
+    """Return guilds where user has MANAGE_GUILD (0x20) permission."""
+    guilds = discord_request("/users/@me/guilds", access_token)
+    if not isinstance(guilds, list):
         return []
+    return [g for g in guilds if (int(g.get("permissions", 0)) & 0x20) == 0x20]
 
-def save_pending_dms(data):
-    path = os.path.join(DATA_DIR, "pending_dms.json")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(path, "w") as fp:
-        json.dump(data, fp, indent=2)
 
-def get_pending_claims():
-    path = os.path.join(DATA_DIR, "pending_claims.json")
+# ── OAuth2 ─────────────────────────────────────────────────────────────────────
+
+@app.route("/auth/discord")
+def auth_discord():
+    state = secrets.token_hex(16)
+    session["oauth_state"] = state
+    redirect_uri = DISCORD_REDIRECT_URI
+    url = (f"https://discord.com/api/oauth2/authorize"
+           f"?client_id={DISCORD_CLIENT_ID}"
+           f"&redirect_uri={requests.utils.quote(redirect_uri, safe='')}"
+           f"&response_type=code&scope=identify+guilds&state={state}")
+    return redirect(url)
+
+
+@app.route("/auth/callback")
+def auth_callback():
+    code  = request.args.get("code")
+    state = request.args.get("state")
+    if not code or state != session.get("oauth_state"):
+        flash("Authentication failed. Please try again.", "error")
+        return redirect(url_for("login"))
+
+    r = requests.post(f"{DISCORD_API}/oauth2/token", data={
+        "client_id":     DISCORD_CLIENT_ID,
+        "client_secret": DISCORD_CLIENT_SECRET,
+        "grant_type":    "authorization_code",
+        "code":          code,
+        "redirect_uri":  DISCORD_REDIRECT_URI,
+    }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=10)
+
+    if not r.ok:
+        flash("Failed to exchange code. Check OAuth2 settings.", "error")
+        return redirect(url_for("login"))
+
+    tokens = r.json()
+    access_token = tokens.get("access_token")
+
+    user   = discord_request("/users/@me", access_token)
+    guilds = get_user_guilds(access_token)
+
+    if not user.get("id"):
+        flash("Failed to fetch user info.", "error")
+        return redirect(url_for("login"))
+
+    session["user_id"]      = int(user["id"])
+    session["username"]     = user.get("username", "Unknown")
+    session["avatar"]       = user.get("avatar", "")
+    session["user_guilds"]  = guilds
+    session["access_token"] = access_token
+
+    db = SessionLocal()
     try:
-        with open(path) as fp:
-            return json.load(fp)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        du = db.query(DashUser).filter_by(id=int(user["id"])).first()
+        if not du:
+            du = DashUser(id=int(user["id"]), username=user["username"],
+                          avatar=user.get("avatar", ""))
+            db.add(du)
+        else:
+            du.username   = user["username"]
+            du.avatar     = user.get("avatar", "")
+            du.last_login = datetime.utcnow()
+        db.commit()
+    finally:
+        db.close()
 
-def save_pending_claims(data):
-    path = os.path.join(DATA_DIR, "pending_claims.json")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(path, "w") as fp:
-        json.dump(data, fp, indent=2)
+    return redirect(url_for("index"))
 
-def user_can_access_guild(u, guild_id):
-    if not u:
-        return False
-    if u.get("is_owner"):
-        return True
-    return str(guild_id) in (u.get("servers") or [])
 
-def current_user():
-    uname = session.get("username")
-    if not uname:
-        return None
-    users = get_users()
-    u = users.get(uname)
-    if not u:
-        return None
-    return {"username": uname, **u}
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
-def login_required(view):
-    @wraps(view)
-    def wrapped(*a, **kw):
-        if not current_user():
-            return redirect(url_for("login"))
-        return view(*a, **kw)
-    return wrapped
 
-def edit_required(view):
-    @wraps(view)
-    def wrapped(*a, **kw):
-        u = current_user()
-        if not u:
-            return redirect(url_for("login"))
-        if not (u.get("is_admin") or u.get("can_edit")):
-            flash("You don't have edit permission. Ask the admin to grant it.", "error")
-            return redirect(url_for("index"))
-        return view(*a, **kw)
-    return wrapped
+# ── Pages ──────────────────────────────────────────────────────────────────────
 
-def admin_required(view):
-    @wraps(view)
-    def wrapped(*a, **kw):
-        u = current_user()
-        if not u:
-            return redirect(url_for("login"))
-        if not u.get("is_admin"):
-            flash("Admin only.", "error")
-            return redirect(url_for("index"))
-        return view(*a, **kw)
-    return wrapped
-
-def owner_required(view):
-    @wraps(view)
-    def wrapped(*a, **kw):
-        u = current_user()
-        if not u:
-            return redirect(url_for("login"))
-        if not u.get("is_owner"):
-            flash("Only the server owner can do that.", "error")
-            return redirect(url_for("index") + "?tab=manage-users")
-        return view(*a, **kw)
-    return wrapped
-
-@app.context_processor
-def inject_context():
-    u         = current_user()
-    all_guilds = list_guilds()
-    if u and u.get("is_owner"):
-        guilds = all_guilds
-    elif u:
-        user_servers = u.get("servers") or []
-        guilds = [g for g in all_guilds if str(g["id"]) in user_servers]
-    else:
-        guilds = []
-    gid = get_active_guild_id()
-    if gid and u and not user_can_access_guild(u, gid):
-        gid = guilds[0]["id"] if guilds else None
-        if gid:
-            session["guild_id"] = gid
-    active_guild = next((g for g in guilds if g["id"] == gid), None)
-    return {
-        "current_user":    u,
-        "can_edit":        bool(u and (u.get("is_admin") or u.get("can_edit"))),
-        "is_admin":        bool(u and u.get("is_admin")),
-        "is_owner":        bool(u and u.get("is_owner")),
-        "guild_list":      guilds,
-        "active_guild":    active_guild,
-        "active_guild_id": gid,
-    }
-
-# ── Health check (UptimeRobot / Render) ───────────────────────────────────────
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"}), 200
 
-# ── Guild switch ───────────────────────────────────────────────────────────────
-@app.route("/switch_guild/<guild_id>")
-@login_required
-def switch_guild(guild_id):
-    guilds = list_guilds()
-    if any(g["id"] == guild_id for g in guilds):
-        session["guild_id"] = guild_id
-    return redirect(url_for("index"))
 
-# ── Auth routes ───────────────────────────────────────────────────────────────
-@app.route("/login", methods=["GET", "POST"])
+@app.route("/login")
 def login():
-    if request.method == "POST":
-        uname = request.form.get("username", "").strip().lower()
-        pw    = request.form.get("password", "")
-        users = get_users()
-        u = users.get(uname)
-        if u and check_password_hash(u["password_hash"], pw):
-            if u.get("discord_id") and not u.get("verified", True):
-                session["pending_verify"] = uname
-                flash("Please verify your Discord account first.", "error")
-                return redirect(url_for("verify_page"))
-            session["username"] = uname
-            return redirect(url_for("index"))
-        flash("Wrong username or password.", "error")
-    if not get_users():
-        return redirect(url_for("signup"))
-    return render_template("login.html")
-
-@app.route("/signup", methods=["GET", "POST"])
-def signup():
-    users      = get_users()
-    first_user = len(users) == 0
-    if request.method == "POST":
-        uname      = request.form.get("username", "").strip().lower()
-        pw         = request.form.get("password", "")
-        discord_id = request.form.get("discord_id", "").strip()
-        if not uname or not pw:
-            flash("Username and password required.", "error")
-        elif len(pw) < 4:
-            flash("Password must be at least 4 characters.", "error")
-        elif not discord_id or not discord_id.isdigit():
-            flash("A valid Discord User ID (numbers only) is required.", "error")
-        elif uname in users:
-            flash("That username is taken.", "error")
-        elif any(v.get("discord_id") == discord_id for v in users.values()):
-            flash("That Discord ID is already linked to an account.", "error")
-        else:
-            code = str(secrets.randbelow(900000) + 100000)
-            users[uname] = {
-                "password_hash":      generate_password_hash(pw),
-                "discord_id":         discord_id,
-                "verified":           first_user,
-                "verification_code":  "" if first_user else code,
-                "is_owner":           first_user,
-                "is_admin":           first_user,
-                "can_edit":           first_user,
-                "servers":            [],
-                "created_at":         datetime.now().isoformat(timespec="seconds"),
-            }
-            save_users(users)
-            if first_user:
-                session["username"] = uname
-                flash("Welcome! You're the global owner.", "ok")
-                return redirect(url_for("index"))
-            dms = get_pending_dms()
-            dms.append({
-                "discord_id": discord_id,
-                "username":   uname,
-                "code":       code,
-                "sent":       False,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-            })
-            save_pending_dms(dms)
-            session["pending_verify"] = uname
-            flash("Account created! Check your Discord DMs for a verification code.", "ok")
-            return redirect(url_for("verify_page"))
-    return render_template("signup.html", first_user=first_user)
-
-@app.route("/logout")
-def logout():
-    session.pop("username", None)
-    session.pop("pending_verify", None)
-    return redirect(url_for("login"))
-
-@app.route("/verify", methods=["GET", "POST"])
-def verify_page():
-    uname = session.get("pending_verify") or session.get("username")
-    if not uname:
-        return redirect(url_for("signup"))
-    users = get_users()
-    u = users.get(uname)
-    if not u:
-        return redirect(url_for("signup"))
-    if u.get("verified"):
-        session["username"] = uname
-        session.pop("pending_verify", None)
+    if "user_id" in session:
         return redirect(url_for("index"))
-    if request.method == "POST":
-        code = request.form.get("code", "").strip()
-        if code == u.get("verification_code", ""):
-            users[uname]["verified"] = True
-            users[uname]["verification_code"] = ""
-            save_users(users)
-            session["username"] = uname
-            session.pop("pending_verify", None)
-            flash("Account verified! Welcome.", "ok")
-            return redirect(url_for("index"))
-        flash("Incorrect code — check your Discord DMs.", "error")
-    return render_template("verify.html", username=uname, discord_id=u.get("discord_id", ""))
+    return render_template("login.html", client_id=DISCORD_CLIENT_ID)
 
-@app.route("/resend_code")
-def resend_code():
-    uname = session.get("pending_verify")
-    if not uname:
-        return redirect(url_for("signup"))
-    users = get_users()
-    u = users.get(uname)
-    if not u or u.get("verified"):
-        return redirect(url_for("index"))
-    code = str(secrets.randbelow(900000) + 100000)
-    users[uname]["verification_code"] = code
-    save_users(users)
-    dms = get_pending_dms()
-    dms.append({
-        "discord_id": u.get("discord_id", ""),
-        "username":   uname,
-        "code":       code,
-        "sent":       False,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-    })
-    save_pending_dms(dms)
-    flash("A new code has been sent to your Discord DMs.", "ok")
-    return redirect(url_for("verify_page"))
 
-@app.route("/claim_server", methods=["POST"])
-@login_required
-def claim_server():
-    u = current_user()
-    if not u.get("discord_id"):
-        return jsonify({"error": "No Discord ID linked to your account."}), 400
-    code   = secrets.token_hex(5).upper()
-    claims = get_pending_claims()
-    claims[code] = {
-        "username":   u["username"],
-        "discord_id": u["discord_id"],
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-    }
-    save_pending_claims(claims)
-    return jsonify({"code": code})
-
-@app.route("/users")
-@admin_required
-def users_page():
-    users = get_users()
-    return render_template("users.html", users=users)
-
-@app.route("/users/toggle_edit/<username>")
-@admin_required
-def toggle_edit(username):
-    users = get_users()
-    if username in users and not users[username].get("is_admin"):
-        users[username]["can_edit"] = not users[username].get("can_edit", False)
-        save_users(users)
-    return redirect(url_for("index") + "?tab=manage-users")
-
-@app.route("/users/make_admin/<username>")
-@owner_required
-def make_admin(username):
-    users = get_users()
-    if username in users and not users[username].get("is_owner"):
-        users[username]["is_admin"] = True
-        users[username]["can_edit"] = True
-        save_users(users)
-    return redirect(url_for("index") + "?tab=manage-users")
-
-@app.route("/users/revoke_admin/<username>")
-@owner_required
-def revoke_admin(username):
-    users = get_users()
-    if username in users and not users[username].get("is_owner"):
-        users[username]["is_admin"] = False
-        save_users(users)
-    return redirect(url_for("index") + "?tab=manage-users")
-
-@app.route("/users/set_role/<username>", methods=["POST"])
-@admin_required
-def set_user_role(username):
-    me    = current_user()
-    users = get_users()
-    if username not in users or users[username].get("is_owner"):
-        flash("Cannot change that user's role.", "error")
-        return redirect(url_for("index") + "?tab=manage-users")
-    role = request.form.get("role", "viewer")
-    if role == "admin" and not me.get("is_owner"):
-        flash("Only the owner can grant admin.", "error")
-        return redirect(url_for("index") + "?tab=manage-users")
-    if role == "admin":
-        users[username]["is_admin"] = True
-        users[username]["can_edit"] = True
-    elif role == "moderator":
-        users[username]["is_admin"] = False
-        users[username]["can_edit"] = True
-    else:
-        users[username]["is_admin"] = False
-        users[username]["can_edit"] = False
-    save_users(users)
-    flash(f"Updated {username} to {role}.", "ok")
-    return redirect(url_for("index") + "?tab=manage-users")
-
-@app.route("/users/delete/<username>")
-@admin_required
-def delete_user(username):
-    me = current_user()
-    if me and username == me["username"]:
-        flash("You can't delete yourself.", "error")
-        return redirect(url_for("index") + "?tab=manage-users")
-    users = get_users()
-    users.pop(username, None)
-    save_users(users)
-    return redirect(url_for("index") + "?tab=manage-users")
-
-# ── Main routes ───────────────────────────────────────────────────────────────
 @app.route("/")
 @login_required
 def index():
-    gid = get_active_guild_id()
-    if gid is None:
-        return render_template("no_guilds.html")
-
-    strikes      = load(gid, "strikes.json", {})
-    logs         = load(gid, "logs.json", [])
-    _bw          = load(gid, "banned_words.json", {})
-    banned_words = {w: t for w, t in _bw.items()} if isinstance(_bw, dict) else {w: 1 for w in _bw}
-    user_names   = load(gid, "user_names.json", {})
-    users        = get_users()
-
-    top_users     = sorted(strikes.items(), key=lambda x: x[1], reverse=True)[:10]
-    action_counts = Counter(e["action"] for e in logs)
-    recent_logs   = list(reversed(logs[-20:]))
-    distribution  = Counter(strikes.values())
-    settings      = {**DEFAULT_SETTINGS, **load(gid, "settings.json", {})}
-    welcome       = {**DEFAULT_WELCOME,  **load(gid, "welcome.json",   {})}
-
-    roles       = load(gid, "roles.json", [])
-    bans        = load(gid, "bans.json",  [])
-    all_members = load(gid, "user_names.json", {})
-
-    return render_template(
-        "index.html",
-        strikes=strikes,
-        top_users=top_users,
-        logs=recent_logs,
-        banned_words=banned_words,
-        action_counts=dict(action_counts),
-        distribution={str(k): v for k, v in sorted(distribution.items())},
-        total_strikes=sum(strikes.values()),
-        total_logs=len(logs),
-        total_words=len(banned_words),
-        settings=settings,
-        user_names=user_names,
-        users=users,
-        welcome=welcome,
-        roles=roles,
-        bans=bans,
-        all_members=all_members,
-    )
-
-@app.route("/add_word", methods=["POST"])
-@edit_required
-def add_word():
-    gid  = get_active_guild_id()
-    word = request.form.get("word", "").lower().strip()
-    tier = max(1, min(5, int(request.form.get("tier", 1))))
-    if word and gid:
-        words = load(gid, "banned_words.json", {})
-        if isinstance(words, list):
-            words = {w: 1 for w in words}
-        words[word] = tier
-        save(gid, "banned_words.json", words)
-    return redirect(url_for("index"))
-
-@app.route("/remove_word/<word>")
-@edit_required
-def remove_word(word):
-    gid   = get_active_guild_id()
-    words = load(gid, "banned_words.json", {})
-    if isinstance(words, list):
-        words = {w: 1 for w in words}
-    words.pop(word, None)
-    save(gid, "banned_words.json", words)
-    return redirect(url_for("index"))
-
-@app.route("/add_strike", methods=["POST"])
-@edit_required
-def add_strike_route():
-    gid      = get_active_guild_id()
-    username = request.form.get("username", "").strip()
-    reason   = request.form.get("reason", "Manual strike (dashboard)").strip()
-    if not username:
-        flash("A username is required.", "error")
-        return redirect(url_for("index") + "?tab=overview")
-
-    user_names = load(gid, "user_names.json", {})
-    uid = next(
-        (uid for uid, dname in user_names.items()
-         if dname.lower() == username.lower()),
-        None
-    )
-    if not uid:
-        flash(f"No user named \"{username}\" found. They need to have sent at least one message so the bot knows them.", "error")
-        return redirect(url_for("index") + "?tab=overview")
-
-    display = user_names.get(uid, username)
-    pending = load(gid, "pending_strikes.json", [])
-    pending.append({
-        "user_id": uid,
-        "reason":  f"{reason} (dashboard — {session.get('username', 'moderator')})",
-    })
-    save(gid, "pending_strikes.json", pending)
-
-    strikes = load(gid, "strikes.json", {})
-    new_count = strikes.get(uid, 0) + 1
-    strikes[uid] = new_count
-    save(gid, "strikes.json", strikes)
-
-    logs = load(gid, "logs.json", [])
-    logs.append({
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "action":    "STRIKE",
-        "user":      f"{display} ({uid})",
-        "reason":    reason,
-        "moderator": session.get("username", "dashboard"),
-    })
-    if len(logs) > 500:
-        logs = logs[-500:]
-    save(gid, "logs.json", logs)
-    flash(f"Strike added — {display} now has {new_count} strike(s). The bot will apply any mute within ~10 seconds.", "ok")
-    return redirect(url_for("index") + "?tab=overview")
-
-@app.route("/unmute_me", methods=["POST"])
-@owner_required
-def unmute_me():
-    gid = request.form.get("guild_id") or get_active_guild_id()
-    if not gid:
-        flash("No server selected.", "error")
-        return redirect(url_for("index"))
-    owner_id = os.environ.get("OWNER_ID", "").strip()
-    if not owner_id:
-        flash("OWNER_ID is not configured.", "error")
-        return redirect(url_for("index"))
-    pending = load(gid, "pending_unmutes.json", [])
-    pending.append({"user_id": owner_id, "reason": "Self-unmute via dashboard"})
-    save(gid, "pending_unmutes.json", pending)
-    flash("Unmute request sent — takes effect within ~10 seconds.", "ok")
-    return redirect(url_for("index"))
-
-@app.route("/unmute_user/<uid>")
-@edit_required
-def unmute_user(uid):
-    gid = get_active_guild_id()
-    if not gid:
-        flash("No server selected.", "error")
-        return redirect(url_for("index"))
-    pending = load(gid, "pending_unmutes.json", [])
-    pending.append({"user_id": uid, "reason": "Manual unmute via dashboard"})
-    save(gid, "pending_unmutes.json", pending)
-    names  = load(gid, "user_names.json", {})
-    display = names.get(uid, uid)
-    flash(f"Unmute request sent for {display} — takes effect within ~10 seconds.", "ok")
-    return redirect(url_for("index") + "?tab=overview")
-
-@app.route("/reset_strikes/<uid>")
-@edit_required
-def reset_strikes(uid):
-    gid     = get_active_guild_id()
-    strikes = load(gid, "strikes.json", {})
-    strikes.pop(uid, None)
-    save(gid, "strikes.json", strikes)
-    return redirect(url_for("index"))
-
-@app.route("/api/stats")
-@login_required
-def api_stats():
-    gid     = get_active_guild_id()
-    strikes = load(gid, "strikes.json", {})
-    logs    = load(gid, "logs.json",    [])
-    words   = load(gid, "banned_words.json", {})
-    return jsonify({
-        "total_strikes":       sum(strikes.values()),
-        "total_users_striked": len(strikes),
-        "total_logs":          len(logs),
-        "total_banned_words":  len(words),
-    })
-
-@app.route("/save_welcome", methods=["POST"])
-@edit_required
-def save_welcome():
-    gid = get_active_guild_id()
-    w   = {**DEFAULT_WELCOME, **load(gid, "welcome.json", {})}
-    w["enabled"]    = request.form.get("enabled") == "1"
-    w["dm"]         = request.form.get("dm") == "1"
-    w["channel_id"] = request.form.get("channel_id", "").strip()
-    w["message"]    = request.form.get("message", DEFAULT_WELCOME["message"])
-    save(gid, "welcome.json", w)
-    flash("Welcome message saved.", "ok")
-    return redirect(url_for("index") + "?tab=welcome")
-
-@app.route("/save_settings", methods=["POST"])
-@edit_required
-def save_settings():
-    gid = get_active_guild_id()
-    s   = {**DEFAULT_SETTINGS, **load(gid, "settings.json", {})}
+    db = SessionLocal()
     try:
-        for t in range(1, 6):
-            s[f"tier{t}_strikes"] = max(1, int(request.form.get(f"tier{t}_strikes", DEFAULT_SETTINGS[f"tier{t}_strikes"])))
-            s[f"tier{t}_minutes"] = max(1, int(request.form.get(f"tier{t}_minutes", DEFAULT_SETTINGS[f"tier{t}_minutes"])))
-        s["spam_word_limit"]       = max(2, int(request.form.get("spam_word_limit",       DEFAULT_SETTINGS["spam_word_limit"])))
-        s["spam_word_window"]      = max(1, int(request.form.get("spam_word_window",      DEFAULT_SETTINGS["spam_word_window"])))
-        s["spam_word_tier"]        = max(1, min(5, int(request.form.get("spam_word_tier", DEFAULT_SETTINGS["spam_word_tier"]))))
-        s["raid_join_limit"]       = max(2, int(request.form.get("raid_join_limit",       DEFAULT_SETTINGS["raid_join_limit"])))
-        s["raid_join_window"]      = max(1, int(request.form.get("raid_join_window",      DEFAULT_SETTINGS["raid_join_window"])))
-        s["raid_lockdown_minutes"] = max(1, int(request.form.get("raid_lockdown_minutes", DEFAULT_SETTINGS["raid_lockdown_minutes"])))
-        s["raid_timeout_minutes"]  = max(1, int(request.form.get("raid_timeout_minutes",  DEFAULT_SETTINGS["raid_timeout_minutes"])))
-    except ValueError:
-        pass
-    save(gid, "settings.json", s)
-    return redirect(url_for("index") + "#settings")
+        uid     = str(session["user_id"])
+        guilds  = session.get("user_guilds", [])
 
-def _queue_action(gid, action_dict):
-    pending = load(gid, "pending_actions.json", [])
-    pending.append(action_dict)
-    save(gid, "pending_actions.json", pending)
+        # Filter to guilds where bot is present (has DB entry)
+        accessible = []
+        for g in guilds:
+            try:
+                cfg = db.query(Guild).filter_by(id=int(g["id"])).first()
+                if cfg or uid == OWNER_ID:
+                    accessible.append(g)
+            except Exception:
+                pass
 
-@app.route("/kick/<uid>")
-@edit_required
-def kick_user(uid):
-    gid     = get_active_guild_id()
-    names   = load(gid, "user_names.json", {})
-    display = names.get(uid, uid)
-    _queue_action(gid, {"action": "kick", "user_id": uid, "reason": "Dashboard kick"})
-    flash(f"Kick queued for {display} — takes effect within ~10 seconds.", "ok")
-    return redirect(url_for("index") + "?tab=moderation")
+        return render_template("index.html",
+                               guilds=accessible,
+                               username=session.get("username"),
+                               avatar=session.get("avatar"),
+                               user_id=uid)
+    finally:
+        db.close()
 
-@app.route("/ban/<uid>")
-@edit_required
-def ban_user(uid):
-    gid     = get_active_guild_id()
-    names   = load(gid, "user_names.json", {})
-    display = names.get(uid, uid)
-    _queue_action(gid, {"action": "ban", "user_id": uid, "reason": "Dashboard ban", "delete_days": 0})
-    flash(f"Ban queued for {display} — takes effect within ~10 seconds.", "ok")
-    return redirect(url_for("index") + "?tab=moderation")
 
-@app.route("/unban/<uid>")
-@edit_required
-def unban_user(uid):
-    gid = get_active_guild_id()
-    _queue_action(gid, {"action": "unban", "user_id": uid, "reason": "Dashboard unban"})
-    flash("Unban queued — takes effect within ~10 seconds.", "ok")
-    return redirect(url_for("index") + "?tab=moderation")
+@app.route("/dashboard/<guild_id>")
+@login_required
+@guild_access_required
+def dashboard(guild_id):
+    db = SessionLocal()
+    try:
+        guild_cfg = get_guild(db, int(guild_id))
 
-@app.route("/create_role", methods=["POST"])
-@admin_required
-def create_role():
-    gid   = get_active_guild_id()
-    name  = request.form.get("name", "").strip()
-    color = request.form.get("color", "#99aab5").lstrip("#")
-    if not name:
-        flash("Role name is required.", "error")
-        return redirect(url_for("index") + "?tab=moderation")
-    _queue_action(gid, {"action": "create_role", "name": name, "color": color})
-    flash(f"Role '{name}' creation queued — takes effect within ~10 seconds.", "ok")
-    return redirect(url_for("index") + "?tab=moderation")
+        # Stats
+        total_strikes   = db.query(Strike).filter_by(guild_id=int(guild_id), active=True).count()
+        total_members   = db.query(Member).filter_by(guild_id=int(guild_id)).count()
+        total_mod_actions = db.query(ModLog).filter_by(guild_id=int(guild_id)).count()
+        open_tickets    = db.query(Ticket).filter_by(guild_id=int(guild_id), status="open").count()
 
-@app.route("/delete_role/<role_id>")
-@admin_required
-def delete_role(role_id):
-    gid = get_active_guild_id()
-    _queue_action(gid, {"action": "delete_role", "role_id": role_id})
-    flash("Role deletion queued — takes effect within ~10 seconds.", "ok")
-    return redirect(url_for("index") + "?tab=moderation")
+        recent_logs = (db.query(ModLog)
+                       .filter_by(guild_id=int(guild_id))
+                       .order_by(ModLog.created_at.desc())
+                       .limit(10).all())
 
-@app.route("/edit_role_permissions/<role_id>", methods=["POST"])
-@admin_required
-def edit_role_permissions(role_id):
-    gid = get_active_guild_id()
-    KNOWN = [
-        "administrator","manage_guild","manage_channels","manage_roles",
-        "manage_messages","manage_nicknames","change_nickname",
-        "kick_members","ban_members",
-        "send_messages","read_message_history","embed_links",
-        "attach_files","mention_everyone","use_application_commands",
-        "mute_members","deafen_members","move_members",
-    ]
-    enabled = [p for p in KNOWN if request.form.get(f"perm_{p}") == "1"]
-    _queue_action(gid, {"action": "edit_role_permissions", "role_id": role_id, "permissions": enabled})
-    flash("Role permissions update queued — takes effect within ~10 seconds.", "ok")
-    return redirect(url_for("index") + "?tab=moderation")
+        # Action breakdown for chart
+        actions = {}
+        for log in db.query(ModLog).filter_by(guild_id=int(guild_id)).all():
+            actions[log.action] = actions.get(log.action, 0) + 1
 
-@app.route("/assign_role", methods=["POST"])
-@edit_required
-def assign_role():
-    gid     = get_active_guild_id()
-    uid     = request.form.get("user_id", "").strip()
-    role_id = request.form.get("role_id", "").strip()
-    if not uid or not role_id:
-        flash("Missing user or role.", "error")
-        return redirect(url_for("index") + "?tab=moderation")
-    _queue_action(gid, {"action": "assign_role", "user_id": uid, "role_id": role_id})
-    flash("Role assignment queued — takes effect within ~10 seconds.", "ok")
-    return redirect(url_for("index") + "?tab=moderation")
+        return render_template("dashboard.html",
+                               guild_id=guild_id,
+                               guild_cfg=guild_cfg,
+                               total_strikes=total_strikes,
+                               total_members=total_members,
+                               total_mod_actions=total_mod_actions,
+                               open_tickets=open_tickets,
+                               recent_logs=recent_logs,
+                               actions=actions,
+                               username=session.get("username"),
+                               avatar=session.get("avatar"))
+    finally:
+        db.close()
 
-@app.route("/remove_role", methods=["POST"])
-@edit_required
-def remove_role():
-    gid     = get_active_guild_id()
-    uid     = request.form.get("user_id", "").strip()
-    role_id = request.form.get("role_id", "").strip()
-    if not uid or not role_id:
-        flash("Missing user or role.", "error")
-        return redirect(url_for("index") + "?tab=moderation")
-    _queue_action(gid, {"action": "remove_role", "user_id": uid, "role_id": role_id})
-    flash("Role removal queued — takes effect within ~10 seconds.", "ok")
-    return redirect(url_for("index") + "?tab=moderation")
+
+@app.route("/dashboard/<guild_id>/settings", methods=["GET", "POST"])
+@login_required
+@guild_access_required
+def settings(guild_id):
+    db = SessionLocal()
+    try:
+        guild_cfg = get_guild(db, int(guild_id))
+
+        if request.method == "POST":
+            f = request.form
+            # Punishment tiers
+            guild_cfg.tier1_strikes  = int(f.get("tier1_strikes", 1))
+            guild_cfg.tier1_minutes  = int(f.get("tier1_minutes", 5))
+            guild_cfg.tier2_strikes  = int(f.get("tier2_strikes", 2))
+            guild_cfg.tier2_minutes  = int(f.get("tier2_minutes", 30))
+            guild_cfg.tier3_strikes  = int(f.get("tier3_strikes", 3))
+            guild_cfg.tier3_minutes  = int(f.get("tier3_minutes", 180))
+            guild_cfg.tier4_strikes  = int(f.get("tier4_strikes", 4))
+            guild_cfg.tier4_action   = f.get("tier4_action", "kick")
+            guild_cfg.tier5_strikes  = int(f.get("tier5_strikes", 5))
+            # Auto-mod
+            guild_cfg.spam_enabled   = "spam_enabled"   in f
+            guild_cfg.spam_threshold = int(f.get("spam_threshold", 5))
+            guild_cfg.spam_window    = int(f.get("spam_window", 10))
+            guild_cfg.caps_enabled   = "caps_enabled"   in f
+            guild_cfg.caps_percent   = int(f.get("caps_percent", 70))
+            guild_cfg.emoji_enabled  = "emoji_enabled"  in f
+            guild_cfg.emoji_limit    = int(f.get("emoji_limit", 10))
+            guild_cfg.mention_enabled = "mention_enabled" in f
+            guild_cfg.mention_limit  = int(f.get("mention_limit", 5))
+            guild_cfg.link_enabled   = "link_enabled"   in f
+            guild_cfg.link_whitelist = f.get("link_whitelist", "")
+            # Channels (stored as int or None)
+            def ch_id(key):
+                v = f.get(key, "").strip()
+                return int(v) if v.isdigit() else None
+            guild_cfg.mod_log_channel = ch_id("mod_log_channel")
+            guild_cfg.welcome_channel = ch_id("welcome_channel")
+            guild_cfg.welcome_enabled = "welcome_enabled" in f
+            guild_cfg.welcome_message = f.get("welcome_message", guild_cfg.welcome_message)
+            guild_cfg.auto_role_id    = ch_id("auto_role_id")
+            # XP
+            guild_cfg.xp_enabled     = "xp_enabled" in f
+            guild_cfg.xp_per_message = int(f.get("xp_per_message", 15))
+            guild_cfg.xp_cooldown    = int(f.get("xp_cooldown", 60))
+            guild_cfg.level_channel  = ch_id("level_channel")
+            # Raid
+            guild_cfg.raid_enabled   = "raid_enabled"  in f
+            guild_cfg.raid_threshold = int(f.get("raid_threshold", 10))
+            guild_cfg.raid_window    = int(f.get("raid_window", 10))
+            guild_cfg.raid_action    = f.get("raid_action", "kick")
+            # Tickets
+            guild_cfg.ticket_enabled  = "ticket_enabled" in f
+            guild_cfg.ticket_category = ch_id("ticket_category")
+            guild_cfg.ticket_log      = ch_id("ticket_log")
+            db.commit()
+            flash("Settings saved!", "success")
+            return redirect(url_for("settings", guild_id=guild_id))
+
+        banned = db.query(BannedWord).filter_by(guild_id=int(guild_id)).all()
+        return render_template("settings.html",
+                               guild_id=guild_id,
+                               guild_cfg=guild_cfg,
+                               banned_words=banned,
+                               username=session.get("username"),
+                               avatar=session.get("avatar"))
+    finally:
+        db.close()
+
+
+@app.route("/dashboard/<guild_id>/users")
+@login_required
+@guild_access_required
+def users(guild_id):
+    db = SessionLocal()
+    try:
+        members = (db.query(Member)
+                   .filter_by(guild_id=int(guild_id))
+                   .order_by(Member.xp.desc())
+                   .limit(100).all())
+        user_data = []
+        for m in members:
+            sc = db.query(Strike).filter_by(
+                guild_id=int(guild_id), user_id=m.user_id, active=True
+            ).count()
+            user_data.append({
+                "user_id":   m.user_id,
+                "username":  m.username or str(m.user_id),
+                "xp":        m.xp,
+                "level":     m.level,
+                "messages":  m.messages,
+                "strikes":   sc,
+                "shadow_muted": m.shadow_muted,
+            })
+        return render_template("users.html",
+                               guild_id=guild_id,
+                               users=user_data,
+                               username=session.get("username"),
+                               avatar=session.get("avatar"))
+    finally:
+        db.close()
+
+
+# ── API endpoints (called by dashboard JS) ─────────────────────────────────────
+
+@app.route("/api/<guild_id>/banned_words", methods=["GET"])
+@login_required
+def api_banned_words(guild_id):
+    db = SessionLocal()
+    try:
+        rows = db.query(BannedWord).filter_by(guild_id=int(guild_id)).all()
+        return jsonify([{"id": r.id, "word": r.word} for r in rows])
+    finally:
+        db.close()
+
+
+@app.route("/api/<guild_id>/banned_words/add", methods=["POST"])
+@login_required
+def api_add_word(guild_id):
+    word = request.json.get("word", "").strip().lower()
+    if not word:
+        return jsonify({"error": "Empty word"}), 400
+    db = SessionLocal()
+    try:
+        existing = db.query(BannedWord).filter_by(guild_id=int(guild_id), word=word).first()
+        if existing:
+            return jsonify({"error": "Already banned"}), 409
+        bw = BannedWord(guild_id=int(guild_id), word=word)
+        db.add(bw)
+        db.commit()
+        return jsonify({"id": bw.id, "word": bw.word})
+    finally:
+        db.close()
+
+
+@app.route("/api/<guild_id>/banned_words/<int:word_id>", methods=["DELETE"])
+@login_required
+def api_delete_word(guild_id, word_id):
+    db = SessionLocal()
+    try:
+        row = db.query(BannedWord).filter_by(id=word_id, guild_id=int(guild_id)).first()
+        if row:
+            db.delete(row)
+            db.commit()
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/<guild_id>/clear_strikes/<int:user_id>", methods=["POST"])
+@login_required
+def api_clear_strikes(guild_id, user_id):
+    db = SessionLocal()
+    try:
+        db.query(Strike).filter_by(
+            guild_id=int(guild_id), user_id=user_id, active=True
+        ).update({"active": False})
+        db.commit()
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+# ── Init & run ─────────────────────────────────────────────────────────────────
+
+init_db()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

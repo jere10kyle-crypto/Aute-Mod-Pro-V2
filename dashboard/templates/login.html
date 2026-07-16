@@ -1,13 +1,43 @@
-{% extends "_auth_base.html" %}
-{% block title %}Login — AutoMod{% endblock %}
-{% block sub %}Sign in to the dashboard{% endblock %}
-{% block content %}
-<form method="post">
-  <label>Username</label>
-  <input type="text" name="username" autofocus required />
-  <label>Password</label>
-  <input type="password" name="password" required />
-  <button type="submit">Sign in</button>
-</form>
-<div class="alt">No account? <a href="{{ url_for('signup') }}">Sign up</a></div>
+{% extends "base.html" %}
+{% block title %}Login — Auto-Mod-Pro V2{% endblock %}
+{% block auth_content %}
+<div class="min-h-screen flex items-center justify-center p-4" style="background:linear-gradient(135deg,#0f1117 0%,#1a1d2e 100%)">
+  <div class="w-full max-w-md">
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center justify-center w-16 h-16 bg-indigo-600 rounded-2xl text-3xl mb-4">🛡️</div>
+      <h1 class="text-3xl font-bold text-white">Auto-Mod-Pro V2</h1>
+      <p class="text-gray-400 mt-2">Advanced Discord moderation dashboard</p>
+    </div>
+    <div class="bg-gray-900 rounded-2xl border border-gray-800 p-8">
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for cat, msg in messages %}
+        <div class="mb-4 p-3 rounded-lg bg-red-900/50 text-red-300 border border-red-700 text-sm">{{ msg }}</div>
+        {% endfor %}
+      {% endwith %}
+      <h2 class="text-xl font-semibold text-white mb-6 text-center">Sign in to your dashboard</h2>
+      {% if client_id %}
+      <a href="{{ url_for('auth_discord') }}"
+         class="flex items-center justify-center gap-3 w-full py-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-white font-semibold transition-colors">
+        <svg class="w-6 h-6" viewBox="0 0 71 55" fill="currentColor">
+          <path d="M60.1 4.9A58.5 58.5 0 0 0 45.7.3a40.5 40.5 0 0 0-1.8 3.7 54.2 54.2 0 0 0-16.2 0A38.8 38.8 0 0 0 26 .4 58.4 58.4 0 0 0 11.5 5C1.7 19.6-.9 33.7.3 47.6a58.9 58.9 0 0 0 18 9.1 43 43 0 0 0 3.7-6 38.4 38.4 0 0 1-5.8-2.8c.5-.4 1-.7 1.4-1.1a41.8 41.8 0 0 0 35.8 0l1.4 1.1a38.2 38.2 0 0 1-5.9 2.8 43 43 0 0 0 3.7 6 58.7 58.7 0 0 0 18.1-9.1c1.5-15.7-2.6-29.7-10.6-41.7zM23.7 39.2c-3.5 0-6.4-3.2-6.4-7.2s2.8-7.2 6.4-7.2 6.5 3.2 6.4 7.2c0 4-2.8 7.2-6.4 7.2zm23.6 0c-3.5 0-6.4-3.2-6.4-7.2s2.8-7.2 6.4-7.2 6.5 3.2 6.4 7.2c0 4-2.8 7.2-6.4 7.2z"/>
+        </svg>
+        Login with Discord
+      </a>
+      {% else %}
+      <div class="p-4 bg-yellow-900/40 border border-yellow-700 rounded-lg text-yellow-300 text-sm">
+        <strong>Setup required:</strong> Add <code>DISCORD_CLIENT_ID</code>, <code>DISCORD_CLIENT_SECRET</code>,
+        and <code>DISCORD_REDIRECT_URI</code> to your Render environment variables.
+      </div>
+      {% endif %}
+      <div class="mt-6 pt-6 border-t border-gray-800 text-center text-xs text-gray-600">
+        Auto-Mod-Pro V2 • Discord OAuth2 Login
+      </div>
+    </div>
+    <div class="mt-6 grid grid-cols-3 gap-4 text-center text-sm text-gray-500">
+      <div class="bg-gray-900/50 rounded-xl p-4 border border-gray-800"><div class="text-2xl mb-1">🛡️</div>Smart Auto-Mod</div>
+      <div class="bg-gray-900/50 rounded-xl p-4 border border-gray-800"><div class="text-2xl mb-1">📊</div>Live Stats</div>
+      <div class="bg-gray-900/50 rounded-xl p-4 border border-gray-800"><div class="text-2xl mb-1">🎫</div>Tickets</div>
+    </div>
+  </div>
+</div>
 {% endblock %}
